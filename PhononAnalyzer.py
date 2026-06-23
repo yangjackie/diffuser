@@ -367,10 +367,16 @@ class PhononAnalyzer:
 
         for t0 in _progress(range(n_origins), desc="VACF origins", leave=False):
             v0 = velocities[t0]  # (n_sel, 3)
-            for tau in range(self.corr_length):
-                vt = velocities[t0 + tau]  # (n_sel, 3)
-                # dot product per atom, then average over atoms
-                vacf_sum[tau] += np.mean(np.sum(v0 * vt, axis=1))
+
+            # for tau in range(self.corr_length):
+            #    vt = velocities[t0 + tau]  # (n_sel, 3)
+            #    # dot product per atom, then average over atoms
+            #    vacf_sum[tau] += np.mean(np.sum(v0 * vt, axis=1))
+
+            # optimised version using einsum to compute the dot products for all tau at once
+            vt_block = velocities[t0 : t0 + self.corr_length]  # (corr_length, n_sel, 3)
+            # Dot product per atom, average over atoms, for all tau at once
+            vacf_sum += np.einsum("ac,tac->t", v0, vt_block, optimize=True) / self.n_selected
 
         vacf_raw = vacf_sum / n_origins
 
@@ -751,3 +757,49 @@ class PhononAnalyzer:
                 writer.writerow([f"{T:.1f}", f"{F:.6f}", f"{Fa:.6f}"])
 
         logger.info("Results saved to %s (prefix=%s)", out_path, prefix)
+
+
+if __name__ == "__main__":
+    import argparse, glob, pickle
+
+    parser = argparse.ArgumentParser(description="PhononAnalyzer: Compute VACF, PDOS and F_vib from an MD trajectory.")
+    parser.add_argument("--partial_dos", action="store_true", help="Compute elemental contributions to PDOS, and save the output to pickle for later anaysis.")
+    parser.add_argument("--temp", type=int, default=900, help="MD temperature in K (default: 900 K).")
+    parser.add_argument("--folder", type=str, default=None, help="Output folder for results (default: current directory).")
+    args = parser.parse_args()
+
+    if args.partial_dos:
+        if args.folder is None:
+            args.folder = (
+                "/Users/jackyang-macmini/OneDrive - UNSW/Documents/Projects/artificial_intelligence/LiPSCl-diffusion/nve_md/FT_MACE_long_traj/"
+                + str(args.temp)
+                + "_K/"
+            )
+        # grab all the traj files in the folder
+        from ase.io import read
+
+        traj_files = glob.glob(os.path.join(args.folder, "nve_md_*.traj"))
+        traj = []
+        for i in range(len(traj_files)):
+            file_path = args.folder + "nve_md_" + str(i + 1) + ".traj"
+            print(f"Reading trajectory file: {file_path}")
+            traj += read(file_path, index=":")
+
+        corr_length = int(0.125 * len(traj))
+        print("Correlation length (frames):", corr_length)
+
+        all_elements_in_traj = list(set(atom.symbol for atom in traj[0]))
+        all_elements_in_traj.sort()  # sort the elements alphabetically for consistent ordering
+        print(all_elements_in_traj)
+
+        for element in all_elements_in_traj:
+            pickle_file = f"/Users/jackyang-macmini/OneDrive - UNSW/Documents/Projects/artificial_intelligence/LiPSCl-diffusion/nve_md/phonon_dos_results/phonon_analyzer_{element}_{args.temp}K_results.pkl"
+            if os.path.exists(pickle_file):
+                print(f"Pickle file for element '{element}' already exists at {pickle_file}. Skipping computation.")
+                continue
+            print(f"Computing VACF and PDOS for element '{element}' …")
+            phonon_analyzer = PhononAnalyzer(traj, temperature=args.temp, time_step=10.0, diffuse_atom=element, zero_padding=1, corr_length=corr_length)
+            phonon_analyzer.compute_vacf(normalisation=False)
+            phonon_analyzer.compute_pdos()
+            # save the PDOS result to a pickle file for later analysis
+            pickle.dump(phonon_analyzer.pdos_result, open(pickle_file, "wb"))

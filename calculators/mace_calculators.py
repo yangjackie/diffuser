@@ -28,9 +28,12 @@ class MACECalculator:
 
     @property
     def calculator(self):
-        if not os.path.exists(os.path.join(self.model_path, self.model_name)):
-            raise FileNotFoundError(f"Model file not found at {os.path.join(self.model_path, self.model_name)}")
-        return mace_mp(model=os.path.join(self.model_path, self.model_name))  # , device="mps", default_dtype="float32")
+        from mace.calculators import MACECalculator
+
+        return MACECalculator(model_path=os.path.join(self.model_path, self.model_name), device="cuda", default_dtype="float64")  # ,enable_cueq=True)
+        # if not os.path.exists(os.path.join(self.model_path, self.model_name)):
+        #    raise FileNotFoundError(f"Model file not found at {os.path.join(self.model_path, self.model_name)}")
+        # return mace_mp(model=os.path.join(self.model_path, self.model_name),device='cuda',default_dtype="float64",enable_cueq=True)  # , device="mps", default_dtype="float32")
 
     @property
     def structure(self):
@@ -61,6 +64,7 @@ class MACECalculator:
         self._structure = sc
 
         print(f"total number of atoms after supercell creation: {len(self._structure)}")
+        # self._structure.set_calculator(self.calculator)
         self._structure.calc = self.calculator
         return self._structure
 
@@ -117,7 +121,7 @@ class MACECalculator:
         print(f"Saving relaxed structure to {poscar_path}")
         write(poscar_path, self.structure, format="vasp")
 
-    def npt_md(self, temperature: float = 300.0, duration_ps: float = 10.0, initialise_velocities: bool = True, write_interval: int = 5) -> None:
+    def npt_md(self, temperature: float = 300.0, duration_ps: float = 10.0, initialise_velocities: bool = True) -> None:
         """
         Run an NPT molecular dynamics equilibration with the MACE calculator to slowly equilibrate the system to the
         cell volume at the target temperature at 1atm (taking into account the effect of thermal expansion).
@@ -133,7 +137,6 @@ class MACECalculator:
             duration_ps (float): Simulation duration in picoseconds. Default is 10.0.
             initialise_velocities (bool): Whether to initialize atomic velocities
                 before running the MD simulation. Default is True.
-            write_interval (int): Interval (in MD steps) at which to write the trajectory and log files. Default is 5.
 
         Returns:
             None
@@ -169,14 +172,14 @@ class MACECalculator:
             # trajectory=str(trajectory_path),
             logfile=str(log_path),
         )
-        npt.attach(trajectory.write, interval=write_interval)
+        npt.attach(trajectory.write, interval=10)
         npt.run(int(duration_ps * 1e3))
 
         poscar_path = os.path.join(npt_path, "CONTCAR")
         print(f"Saving final structure to {poscar_path}")
         write(poscar_path, self.structure, format="vasp")
 
-    def nve_md(self, temperature: float = 300.0, duration_ps: float = 10.0, initialise_velocities: bool = False, write_interval: int = 5) -> None:
+    def nve_md(self, temperature: float = 300.0, duration_ps: float = 10.0, initialise_velocities: bool = False) -> None:
         """
         Run an NVE molecular dynamics simulation with the MACE calculator.
 
@@ -189,7 +192,7 @@ class MACECalculator:
             duration_ps (float): Simulation duration in picoseconds. Default is 10.0.
             initialise_velocities (bool): Whether to initialize atomic velocities
                 before running the MD simulation. Default is True.
-            write_interval (int): Interval (in MD steps) at which to write the trajectory and log files. Default is 5.
+
         Returns:
             None
 
@@ -218,10 +221,67 @@ class MACECalculator:
             timestep=1 * units.fs,
             logfile=str(log_path),
         )
-        nve.attach(trajectory.write, interval=write_interval)
+        nve.attach(trajectory.write, interval=10)
         nve.run(int(duration_ps * 1e3))
 
         poscar_path = os.path.join(nve_path, "CONTCAR")
+        print(f"Saving final structure to {poscar_path}")
+        write(poscar_path, self.structure, format="vasp")
+
+    def langevin_md(self, temperature: float = 300.0, duration_ps: float = 10.0, gamma: float = 0.01, initialise_velocities: bool = False) -> None:
+        """
+        Run a Langevin molecular dynamics simulation with the MACE calculator.
+
+        The structure is propagated using ASE's ``Langevin`` integrator, which includes stochastic and frictional forces to mimic a heat bath at the specified temperature. If requested, velocities are initialized from a Maxwell-Boltzmann distribution before the simulation. Output files are written into a ``langevin_md`` directory under ``self.output_dir``.
+
+        Args:
+            temperature (float): Target temperature in K for velocity initialization. Default is 300.0.
+            duration_ps (float): Simulation duration in picoseconds. Default is 10.0.
+            gamma (float): Friction coefficient for the Langevin thermostat in fs^-1. Default is 0.01.
+            initialise_velocities (bool): Whether to initialize atomic velocities
+                before running the MD simulation. Default is True.
+
+        Returns:
+            None
+
+        Output files:
+            - langevin_md.traj: Trajectory file for the MD run.
+            - langevin_md.log: Log file for the MD run.
+            - CONTCAR: Final structure written in VASP format.
+        """
+
+        langevin_path = os.path.join(self.output_dir, "langevin_md", str(int(temperature)) + "_K_gamma_" + str(gamma).replace(".", "_"))
+        if not os.path.exists(langevin_path):
+            os.makedirs(langevin_path)
+        trajectory_path = os.path.join(langevin_path, "langevin_md.traj")
+        log_path = os.path.join(langevin_path, "langevin_md.log")
+
+        if initialise_velocities:
+            from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
+
+            MaxwellBoltzmannDistribution(self.structure, temperature_K=temperature)
+
+        from ase.md.langevin import Langevin
+
+        trajectory = Trajectory(trajectory_path, "w", self.structure)
+
+        # find all the non-Li-elements and set a constratinst to only allow the Li atoms to move during the MD simulation
+        input_atom_order = self.structure.get_chemical_symbols()
+        input_atom_oder_dict = {i: symbol for i, symbol in enumerate(input_atom_order)}
+        gamma_list = [gamma if symbol != "Li" else 0.0 for i, symbol in input_atom_oder_dict.items()]
+
+        langevin = Langevin(
+            self.structure,
+            timestep=1 * units.fs,
+            temperature_K=float(temperature),
+            friction=np.array([g / units.fs for g in gamma_list]),
+            logfile=str(log_path),
+            fixcm=False,
+        )
+        langevin.attach(trajectory.write, interval=10)
+        langevin.run(int(duration_ps * 1e3))
+
+        poscar_path = os.path.join(langevin_path, "CONTCAR")
         print(f"Saving final structure to {poscar_path}")
         write(poscar_path, self.structure, format="vasp")
 
@@ -246,9 +306,10 @@ if __name__ == "__main__":
     # md control arguments
     parser.add_argument("--npt", action="store_true", help="Whether to perform NPT MD equilibration.")
     parser.add_argument("--nve", action="store_true", help="Whether to perform NVE MD simulation.")
+    parser.add_argument("--langevin", action="store_true", help="Whether to perform Langevin MD simulation.")
     parser.add_argument("--temperature", type=float, default=300.0, help="Temperature for NPT MD equilibration in K.")
     parser.add_argument("--duration_ps", type=float, default=10.0, help="Duration of NPT MD equilibration in picoseconds.")
-    parser.add_argument("--write_interval", type=int, default=5, help="Interval (in MD steps) at which to write trajectory and log files.")
+    parser.add_argument("--gamma", type=float, default=0.001, help="Friction coefficient for Langevin MD simulation.")
     args = parser.parse_args()
 
     mace_calculator = MACECalculator(model_path=args.model_path, model_name=args.model_name, supercell_size=args.dim)
@@ -260,9 +321,13 @@ if __name__ == "__main__":
         print("Structure relaxation completed.")
     elif args.npt:
         print("Starting NPT MD equilibration...")
-        mace_calculator.npt_md(temperature=args.temperature, duration_ps=args.duration_ps, write_interval=args.write_interval)
+        mace_calculator.npt_md(temperature=args.temperature, duration_ps=args.duration_ps)
         print("NPT MD equilibration completed.")
     elif args.nve:
         print("Starting NVE MD simulation...")
         mace_calculator.nve_md(temperature=args.temperature, duration_ps=args.duration_ps)
         print("NVE MD simulation completed.")
+    elif args.langevin:
+        print("Starting Langevin MD simulation...")
+        mace_calculator.langevin_md(temperature=args.temperature, duration_ps=args.duration_ps, gamma=args.gamma)
+        print("Langevin MD simulation completed.")
