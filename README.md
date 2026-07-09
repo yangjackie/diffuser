@@ -18,6 +18,8 @@ The methodology follows: J. Yang et al., *"Accounting for the vibrational contri
 diffuser/
 ├── calculators/
 │   └── mace_calculators.py   # MACE-powered structure relaxation and MD
+├── mace_model/
+│   └── MACE_FT_LiPSCL_compiled.model # the fine-tuned MACE model for studying the dynamics of Li6PS5Cl fast ion conductor 
 ├── PhononAnalyzer.py          # VACF, PDOS, and vibrational thermodynamics
 ├── essential_dynamics.ipynb   # PCA of atomic displacements (NVE trajectories)
 ├── essential_dynamics_langevin.ipynb  # Same analysis for Langevin/NPT trajectories
